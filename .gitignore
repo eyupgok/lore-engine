@@ -1,6 +1,20 @@
+# --- Python & RAG Dosyaları ---
 __pycache__/
 *.pyc
+chroma_db/
+
+# --- Java & Spring Boot Dosyaları ---
+target/
+*.jar
+*.war
+*.class
+
+# --- IDE ve Ortam Ayarları ---
 .env
 .vscode/
+.idea/
+*.iml
+
+# --- Özel Test Dosyaları ---
 model_tesp.py
 qqqq.py

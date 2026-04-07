@@ -1,65 +1,91 @@
-# ai_engine.py  # Bu dosya AI motoru sınıfını içerir
-import torch  # PyTorch kütüphanesi, tensör ve GPU hesaplama desteği sağlar
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline  # HuggingFace model/tokenizer araçları
+# ai_engine.py
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline
+# --- YENİ EKLENEN KÜTÜPHANELER ---
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 
-class AIEngine:  # AI motorunu sarmalayan sınıf
-    def __init__(self, model_path: str):  # Yapıcı, model yolunu parametre olarak alır
-        print("AIEngine: Sistem başlatılıyor, model GPU'ya yükleniyor (4-bit)...")  # Başlangıç mesajı
+class AIEngine:
+    def __init__(self, model_path: str):
+        print("AIEngine: Sistem başlatılıyor...")
         
-        quant_config = BitsAndBytesConfig(  # Model kuantizasyon ayarları oluşturulur
-            load_in_4bit=True,  # 4-bit düşük bellekli model yükleme
-            bnb_4bit_compute_dtype=torch.float16,  # Hesaplama için float16 kullan
-            bnb_4bit_quant_type="nf4"  # Nf4 kuantizasyon tipini seç
+        # 1. LLM MODELİNİ YÜKLEME (Aşçıyı mutfağa alma - Eski kod)
+        print("AIEngine: Model GPU'ya yükleniyor (4-bit)...")
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4"
         )
         
-        try:  # Model yükleme işlemini dene
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path)  # Tokenizer'ı model yolundan yükle
-            self.model = AutoModelForCausalLM.from_pretrained(  # Dil modelini yükle
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
-                quantization_config=quant_config,  # Kuantizasyon ayarını uygula
-                device_map="auto"  # Mümkünse GPU'ya otomatik dağıtım
+                quantization_config=quant_config,
+                device_map="auto"
             )
             
-            self.ai_pipeline = pipeline(  # Text generation pipeline'ı oluştur
+            self.ai_pipeline = pipeline(
                 "text-generation", 
                 model=self.model, 
                 tokenizer=self.tokenizer
             )
-            print("AIEngine: Model başarıyla servise entegre edildi!")  # Başarılı yükleme mesajı
-            
-        except Exception as e:  # Hata durumunu yakala
-            print(f"Kritik Hata! Model yüklenemedi: {e}")  # Hata mesajı yaz
-            raise e  # Hatanın yükseltilmesi
+            print("AIEngine: LLM Modeli başarıyla yüklendi!")
 
-    def generate_answer(self, prompt: str, max_tokens: int, temperature: float) -> str:  # Cevap üretme fonksiyonu
-        # 1. STANDART CHAT FORMATI
-        # Modele bir sistem kişiliği (System Prompt) ve kullanıcının sorusunu veriyoruz.
-        messages = [  # Konuşma dizisi oluşturulur
-            {"role": "system", "content": "Sen yardımsever ve Türkçe konuşan bir asistansın. Kısa, net ve öz cevaplar verirsin."},  # Sistem rolü
-            {"role": "user", "content": prompt}  # Kullanıcı rolü
+            # 2. RAG VERİTABANINI YÜKLEME (Kütüphaneyi mutfağa getirme - YENİ KOD)
+            print("AIEngine: ChromaDB Vektör Veritabanı bağlanıyor...")
+            # Çevirmeni tekrar çağırıyoruz çünkü gelen soruyu da koordinata çevireceğiz
+            self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+            # Diskteki chroma_db klasörünü okuma modunda açıyoruz
+            self.db = Chroma(persist_directory="./chroma_db", embedding_function=self.embeddings)
+            print("AIEngine: Tüm sistemler servise hazır! Lore Uzmanı aktif.")
+            
+        except Exception as e:
+            print(f"Kritik Hata! Sistem yüklenemedi: {e}")
+            raise e
+
+    def generate_answer(self, prompt: str, max_tokens: int, temperature: float) -> str:
+        # --- 1. AŞAMA: KOPYA ÇEKME (RETRIEVAL) ---
+        # Kullanıcının sorusuna en çok benzeyen (matematiksel olarak en yakın) 2 paragrafı veritabanından getir.
+        search_results = self.db.similarity_search(prompt, k=2)
+        
+        # Gelen paragrafları alt alta ekleyerek bir "Kopya Kağıdı" metni oluştur.
+        context_text = ""
+        for doc in search_results:
+            context_text += doc.page_content + "\n\n"
+            
+        # --- 2. AŞAMA: PROMPT MÜHENDİSLİĞİ (AUGMENTATION) ---
+        # Modele yeni ve çok katı bir anayasa (System Prompt) veriyoruz.
+        system_message = f"""Sen Orta Dünya tarihi konusunda uzman bir bilgesin.
+Kullanıcının sorusunu SADECE aşağıdaki 'KOPYA KAĞIDI' bölümünde verilen bilgilere dayanarak cevapla.
+Eğer sorunun cevabı bu bilgilerde yoksa kesinlikle uydurma ve "Bu bilgi kadim kitaplarda yer almıyor" de.
+
+KOPYA KAĞIDI:
+{context_text}"""
+
+        # --- 3. AŞAMA: ÜRETİM (GENERATION) ---
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
         ]
         
-        # 2. TOKENIZER TEMPLATE UYGULAMASI (Kritik Çözüm)
-        # Modelin kendi özel etiketlerini otomatik olarak ekler (Örn: <|im_start|>, <|im_end|>)
-        formatted_prompt = self.tokenizer.apply_chat_template(  # Prompta model formatı uygula
+        formatted_prompt = self.tokenizer.apply_chat_template(
             messages,
-            tokenize=False,  # Özel tokenizasyon devre dışı bırakıldı
-            add_generation_prompt=True  # Üretim kısmı için gerekli eklemeyi yap
+            tokenize=False,
+            add_generation_prompt=True
         )
         
-        # 3. ÜRETİM VE DURMA SİNYALİ (EOS TOKEN)
-        result = self.ai_pipeline(  # Metin üretimini çalıştır
+        result = self.ai_pipeline(
             formatted_prompt,
-            max_new_tokens=max_tokens,  # Üretilecek maksimum yeni token
-            temperature=temperature,  # Rastgelelik sıcaklığı
-            do_sample=True,  # Örnekleme modu
-            truncation=True,  # Uzunluk sınırını uygula
-            eos_token_id=self.tokenizer.eos_token_id, # Modele "Cevabın bitince DUR" emri
-            pad_token_id=self.tokenizer.eos_token_id  # Dolgu tokenı olarak EOS kullan
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            do_sample=True,
+            truncation=True,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.eos_token_id
         )
         
-        # 4. ÇIKTIYI TEMİZLEME
-        generated_text = result[0]["generated_text"]  # Üretilen tam metin
-        answer_only = generated_text[len(formatted_prompt):].strip()  # Sadece yeni cevap kısmını ayıkla
+        generated_text = result[0]["generated_text"]
+        answer_only = generated_text[len(formatted_prompt):].strip()
         
-        return answer_only  # Temizlenmiş cevabı döndür
+        return answer_only
